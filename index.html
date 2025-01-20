@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Motion and Sound Trigger (Demo)</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 20px;
+      }
+      #video,
+      #canvas {
+        border: 1px solid #ccc;
+        max-width: 400px;
+      }
+      #controls {
+        margin-top: 1rem;
+      }
+      .info {
+        font-size: 0.9rem;
+        color: #666;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Motion and Sound Trigger (Demo)</h1>
+
+    <p>
+      <strong>Важно:</strong> для работы требуется разрешение на доступ к камере
+      и микрофону. На некоторых браузерах потребуется запуск по HTTPS или
+      <code>http://localhost</code>.
+    </p>
+
+    <!-- Видео-поток с веб-камеры -->
+    <video id="video" autoplay playsinline></video>
+    <!-- Canvas для анализа движения -->
+    <canvas id="canvas" width="400" height="300" style="display: none"></canvas>
+
+    <div id="controls">
+      <label>
+        <input type="checkbox" id="motionDetection" checked />
+        Включить детектирование движения
+      </label>
+      <br />
+      <label>
+        <input type="checkbox" id="soundDetection" checked />
+        Включить детектирование громких звуков
+      </label>
+      <br />
+      <label>
+        <input type="checkbox" id="speechRecognition" checked />
+        Включить распознавание речи
+      </label>
+    </div>
+
+    <p class="info">
+      При обнаружении движения, громкого шума или «волшебных фраз» (например,
+      «напомни мне», «спасибо») откроется вкладка с сайтом (не чаще одного раза
+      в 5 минут).
+    </p>
+
+    <script>
+      // ===== Настройки =====
+      const TARGET_URL = "https://orlenok777.github.io/oitodo/"; // Ссылка, которую будем открывать
+      const COOLDOWN = 5 * 60 * 1000; // 5 минут в мс
+
+      // Порог "громкости" (условный). В реальности нужно подбирать, вычитывать RMS и т.д.
+      const SOUND_THRESHOLD = 0.15;
+      // Порог "движения" (сумма разницы пикселей). Чем меньше, тем чувствительнее.
+      const MOTION_THRESHOLD = 10000;
+      // "Магические" фразы
+      const MAGIC_PHRASES = ["напомни мне", "спасибо"];
+
+      // ===== Глобальные переменные =====
+      let lastTriggerTime = 0; // когда в последний раз открывали страницу
+      let videoEl, canvasEl, ctx;
+      let width, height;
+
+      // ===== Инициализация видео (камера) =====
+      async function initCamera() {
+        videoEl = document.getElementById("video");
+        canvasEl = document.getElementById("canvas");
+        ctx = canvasEl.getContext("2d");
+
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+          });
+          videoEl.srcObject = stream;
+
+          // Подождём, пока видео реально загрузится
+          videoEl.onloadedmetadata = () => {
+            width = videoEl.videoWidth;
+            height = videoEl.videoHeight;
+            canvasEl.width = width;
+            canvasEl.height = height;
+          };
+
+          initSound(stream); // Параллельно инициализируем звук
+        } catch (e) {
+          console.error("Ошибка доступа к камере/микрофону:", e);
+          alert("Ошибка: нет доступа к камере/микрофону.");
+        }
+      }
+
+      // ===== Детектирование движения =====
+      let prevFrame = null;
+      function detectMotion() {
+        const motionOn = document.getElementById("motionDetection").checked;
+        if (!motionOn || !width || !height) {
+          requestAnimationFrame(detectMotion);
+          return;
+        }
+
+        // Рисуем текущий кадр на canvas
+        ctx.drawImage(videoEl, 0, 0, width, height);
+        // Получаем пиксели
+        const currentFrame = ctx.getImageData(0, 0, width, height);
+
+        if (prevFrame) {
+          // Считаем суммарное различие
+          let diff = 0;
+          for (let i = 0; i < currentFrame.data.length; i += 4) {
+            // i, i+1, i+2 - каналы R,G,B
+            const rDiff = currentFrame.data[i] - prevFrame.data[i];
+            const gDiff = currentFrame.data[i + 1] - prevFrame.data[i + 1];
+            const bDiff = currentFrame.data[i + 2] - prevFrame.data[i + 2];
+            const pixelDiff =
+              Math.abs(rDiff) + Math.abs(gDiff) + Math.abs(bDiff);
+            diff += pixelDiff;
+          }
+          // Если diff > MOTION_THRESHOLD, считаем, что есть движение
+          if (diff > MOTION_THRESHOLD) {
+            triggerEvent("motion");
+          }
+        }
+
+        prevFrame = currentFrame;
+
+        requestAnimationFrame(detectMotion);
+      }
+
+      // ===== Детектирование громкого звука =====
+      let audioContext, analyser, dataArray, microphone;
+      function initSound(stream) {
+        const soundOn = document.getElementById("soundDetection").checked;
+        if (!soundOn) return;
+
+        audioContext = new AudioContext();
+        microphone = audioContext.createMediaStreamSource(stream);
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 2048;
+        dataArray = new Uint8Array(analyser.fftSize);
+        microphone.connect(analyser);
+
+        checkSoundLevel();
+      }
+
+      function checkSoundLevel() {
+        const soundOn = document.getElementById("soundDetection").checked;
+        if (!soundOn) {
+          requestAnimationFrame(checkSoundLevel);
+          return;
+        }
+
+        analyser.getByteTimeDomainData(dataArray);
+        // Рассчитаем «громкость» (примерно) как отклонение от 128
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          let val = (dataArray[i] - 128) / 128; // -1..+1
+          sum += val * val;
+        }
+        const rms = Math.sqrt(sum / dataArray.length); // корень квадратный от среднего квадрата
+
+        if (rms > SOUND_THRESHOLD) {
+          triggerEvent("sound");
+        }
+
+        requestAnimationFrame(checkSoundLevel);
+      }
+
+      // ===== Распознавание речи (Web Speech API) =====
+      let recognition;
+      function initSpeechRecognition() {
+        const speechOn = document.getElementById("speechRecognition").checked;
+        if (!speechOn) return;
+
+        // Проверяем, поддерживается ли Web Speech API
+        const SpeechRecognition =
+          window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          console.warn("Ваш браузер не поддерживает SpeechRecognition.");
+          return;
+        }
+
+        recognition = new SpeechRecognition();
+        recognition.lang = "ru-RU";
+        recognition.continuous = true;
+        recognition.interimResults = false;
+
+        recognition.onresult = (event) => {
+          const results = event.results;
+          const phrase = results[results.length - 1][0].transcript
+            .trim()
+            .toLowerCase();
+          console.log("Распознано:", phrase);
+          for (let magic of MAGIC_PHRASES) {
+            if (phrase.includes(magic)) {
+              triggerEvent("speech");
+              break;
+            }
+          }
+        };
+
+        recognition.onerror = (e) => {
+          console.warn("SpeechRecognition error:", e.error);
+        };
+        recognition.onend = () => {
+          // Автоматический перезапуск, если не выключено
+          if (document.getElementById("speechRecognition").checked) {
+            recognition.start();
+          }
+        };
+        recognition.start();
+      }
+
+      // ===== Универсальный триггер события =====
+      function triggerEvent(type) {
+        const now = Date.now();
+        if (now - lastTriggerTime < COOLDOWN) {
+          // Прошло недостаточно времени
+          return;
+        }
+        lastTriggerTime = now;
+
+        console.log("Событие сработало:", type);
+        // Открываем вкладку (либо новую, либо фокусируемся — но реально фокусировать уже открытую невозможно напрямую)
+        window.open(TARGET_URL, "_blank");
+      }
+
+      // ===== Инициализация всего при загрузке =====
+      window.addEventListener("DOMContentLoaded", () => {
+        initCamera();
+        requestAnimationFrame(detectMotion);
+        initSpeechRecognition();
+
+        // Отслеживаем изменения чекбоксов, чтобы включать/выключать функции
+        document
+          .getElementById("motionDetection")
+          .addEventListener("change", () => {
+            if (!document.getElementById("motionDetection").checked) {
+              prevFrame = null; // сбросим предыдущий кадр
+            }
+          });
+        document
+          .getElementById("soundDetection")
+          .addEventListener("change", () => {
+            if (!document.getElementById("soundDetection").checked) {
+              // при отключении звука ничего особо не делаем, просто при checkSoundLevel() будет пропуск
+            } else {
+              if (audioContext && audioContext.state === "suspended") {
+                audioContext.resume();
+              }
+            }
+          });
+        document
+          .getElementById("speechRecognition")
+          .addEventListener("change", () => {
+            if (document.getElementById("speechRecognition").checked) {
+              initSpeechRecognition();
+            } else {
+              if (recognition) {
+                recognition.stop();
+              }
+            }
+          });
+      });
+    </script>
+  </body>
+</html>
