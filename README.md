@@ -1,0 +1,2 @@
+# startDetectTriger
+Created with CodeSandbox
